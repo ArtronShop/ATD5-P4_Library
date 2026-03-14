@@ -1,0 +1,18 @@
+{
+    "name": "ATD5-P4",
+    "version": "1.0.0",
+    "keywords": "display, hmi, esp32, esp32-p4, esp8266, arduino",
+    "description": "Library for ATD5-P4. HMI with ESP32-P4",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/ArtronShop/ATD5-P4_Library.git"
+    },
+    "authors": [
+        {
+            "name": "Sonthaya Nongnuch",
+            "email": "sonthaya.nt@hotmail.com"
+        }
+    ],
+    "frameworks": "arduino",
+    "platforms": "espressif32"
+}
