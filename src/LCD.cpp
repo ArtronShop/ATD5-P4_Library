@@ -573,32 +573,38 @@ void LCD::loop() {
 	}
 
 	{ // Auto sleep
-		static uint8_t state = 0;
-		if (this->auto_sleep_after_sec > 0) { // enable auto sleep
-			if (state == 0) {
-				if ((millis() - last_touch_on_display) >=
-					(this->auto_sleep_after_sec * 1000)) {
-					this->off();
-					state = 1;
-				}
-			} else if (state == 1) {
-				if ((millis() - last_touch_on_display) <
-					(this->auto_sleep_after_sec * 1000)) {
-					lv_obj_invalidate(lv_scr_act());
-					lv_timer_handler();
-					this->on();
-					state = 0;
-				}
-			}
-		} else {			  // disable auto sleep
-			if (state != 0) { // but now in sleep
-				lv_obj_invalidate(lv_scr_act());
-				lv_timer_handler();
-				this->on();
-				state = 0;
-			}
-		}
-	}
+	    static uint8_t state = 0;
+	    if (this->auto_sleep_after_sec > 0) { // enable auto sleep
+	      if (state == 0) {
+	        if ((millis() - last_touch_on_display) >= (this->auto_sleep_after_sec / 2 * 1000)) {
+	          analogWrite(LCD_PIN_BK_LIGHT, map(this->brightness / 2, 0, 100, 0, 255));
+	          state = 1;
+	        }
+	      } else if (state == 1) {
+	        if ((millis() - last_touch_on_display) >= (this->auto_sleep_after_sec * 1000)) {
+	          this->off();
+	          state = 2;
+	        } else if ((millis() - last_touch_on_display) < (this->auto_sleep_after_sec / 2 * 1000)) {
+	          this->setBrightness(this->brightness);
+	          state = 0;
+	        }
+	      } else if (state == 2) {
+	        if ((millis() - last_touch_on_display) < (this->auto_sleep_after_sec * 1000)) {
+	          lv_obj_invalidate(lv_scr_act());
+	          lv_timer_handler();
+	          this->on();
+	          state = 0;
+	        }
+	      }
+	    } else { // disable auto sleep
+	      if (state != 0) { // but now in sleep
+	        lv_obj_invalidate(lv_scr_act());
+	        lv_timer_handler();
+	        this->on();
+	        state = 0;
+	      }
+	    }
+	  }
 
 	if (xSafeUpdateQueue) { // Safe UI update
 		SafeUpdateParam_t safe_update_item;
