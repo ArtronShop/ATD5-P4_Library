@@ -12,35 +12,35 @@ static const char * TAG = "Touch";
 GT911::GT911() { }
 
 bool GT911::readReg(uint16_t reg, uint8_t *data, uint8_t len) {
-    Wire.beginTransmission(GT911_ADDR);
-    Wire.write(reg >> 8);
-    Wire.write(reg & 0xFF);
-    if (Wire.endTransmission(false) != 0) {
+    Wire1.beginTransmission(GT911_ADDR);
+    Wire1.write(reg >> 8);
+    Wire1.write(reg & 0xFF);
+    if (Wire1.endTransmission(false) != 0) {
         ESP_LOGE(TAG, "Write error !");
         return false;
     }
 
-    uint8_t count = Wire.requestFrom(GT911_ADDR, len);
+    uint8_t count = Wire1.requestFrom(GT911_ADDR, len);
     if (count != len) {
         ESP_LOGE(TAG, "Read error !");
         return false;
     }
 
     for (uint8_t i = 0; i < len; i++) {
-        data[i] = Wire.read();
+        data[i] = Wire1.read();
     }
 
     return true;
 }
 
 bool GT911::writeReg(uint16_t reg, uint8_t *data, uint8_t len) {
-    Wire.beginTransmission(GT911_ADDR);
-    Wire.write(reg >> 8);
-    Wire.write(reg & 0xFF);
+    Wire1.beginTransmission(GT911_ADDR);
+    Wire1.write(reg >> 8);
+    Wire1.write(reg & 0xFF);
     for (uint8_t i = 0; i < len; i++) {
-        Wire.write(data[i]);
+        Wire1.write(data[i]);
     }
-    return Wire.endTransmission() == 0;
+    return Wire1.endTransmission() == 0;
 }
 
 bool GT911::writeReg(uint16_t reg, uint8_t data) {
@@ -48,21 +48,66 @@ bool GT911::writeReg(uint16_t reg, uint8_t data) {
 }
 
 void GT911::begin() {
-    Wire.begin(TOUCH_SDA_PIN, TOUCH_SCL_PIN, (uint32_t) 400E3);
+    Wire1.begin(TOUCH_SDA_PIN, TOUCH_SCL_PIN, (uint32_t) 400E3);
 
+    Wire1.setTimeOut(50);
+    this->reset();
+}
+
+void GT911::reset() {
     pinMode(TOUCH_RST_PIN, OUTPUT);
-	
-	// Reset
+
     digitalWrite(TOUCH_RST_PIN, LOW);
     delay(20);
     digitalWrite(TOUCH_RST_PIN, HIGH);
     delay(50);
 }
 
+// Re-init the I2C bus and reset the controller after repeated failures
+void GT911::recover() {
+    ESP_LOGW(TAG, "Recovering I2C bus");
+
+    // Stop I2C bus on master
+    Wire1.end();
+
+    // Stop GT911
+    digitalWrite(TOUCH_RST_PIN, LOW);
+
+    delay(20);
+
+    // Start I2C bus on master
+    Wire1.begin(TOUCH_SDA_PIN, TOUCH_SCL_PIN, (uint32_t) 400E3);
+    Wire1.setTimeOut(50);
+
+    // Start GT911
+    digitalWrite(TOUCH_RST_PIN, HIGH);
+    delay(50);
+}
+
 uint8_t GT911::read(uint16_t *cx, uint16_t *cy) {
+    static unsigned long last_recover = 0;
+    uint8_t n = this->readPoint(cx, cy);
+
+    if (!this->failed) {
+        this->fail_count = 0;
+        return n;
+    }
+
+    // Bus error: recover after 5 consecutive failures, at most once per second
+    if (++this->fail_count >= 5 && (millis() - last_recover) >= 1000) {
+        last_recover = millis();
+        this->fail_count = 0;
+        this->recover();
+    }
+    return 0;
+}
+
+uint8_t GT911::readPoint(uint16_t *cx, uint16_t *cy) {
+    this->failed = false;
     uint8_t touch_info;
     if (!this->readReg(0x814E, &touch_info, 1)) {
         ESP_LOGE(TAG, "Read error !");
+        this->failed = true;
         return 0;
     }
 
@@ -72,6 +117,7 @@ uint8_t GT911::read(uint16_t *cx, uint16_t *cy) {
 
     if (!this->writeReg(0x814E, 0x00)) {
         ESP_LOGE(TAG, "Write error !");
+        this->failed = true;
         return 0;
     }
 
@@ -84,6 +130,7 @@ uint8_t GT911::read(uint16_t *cx, uint16_t *cy) {
     uint8_t data[4];
     if (!this->readReg(0x8150, data, 4)) {
         ESP_LOGE(TAG, "Read error !");
+        this->failed = true;
         return 0;
     }
 

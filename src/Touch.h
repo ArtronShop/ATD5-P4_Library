@@ -9,6 +9,11 @@ class GT911 {
         bool readReg(uint16_t reg, uint8_t *data, uint8_t len) ;
         bool writeReg(uint16_t reg, uint8_t *data, uint8_t len) ;
         bool writeReg(uint16_t reg, uint8_t data) ;
+        void reset() ;
+        void recover() ;
+        uint8_t readPoint(uint16_t *, uint16_t *) ;
+        uint8_t fail_count = 0;
+        bool failed = false;
 
     public: 
         GT911() ;
