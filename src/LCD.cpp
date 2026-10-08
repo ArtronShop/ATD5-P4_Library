@@ -4,8 +4,24 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_rgb.h"
 #include "esp_ldo_regulator.h"
+#include "esp_timer.h"
 
 static const char *TAG = "LCD";
+
+// Build-flag knobs for A/B testing LVGL performance
+#ifndef LCD_LVGL_BUF_LINES
+#define LCD_LVGL_BUF_LINES 480      // draw buffer height in lines (480 = full screen)
+#endif
+#ifndef LCD_LVGL_BUF_INTERNAL
+#define LCD_LVGL_BUF_INTERNAL 0     // 1 = internal SRAM (double buffered), 0 = PSRAM (single)
+#endif
+#ifndef LCD_LVGL_PROFILE
+#define LCD_LVGL_PROFILE 0          // print flush statistics every second
+#endif
+#ifndef LCD_LVGL_DIRECT
+#define LCD_LVGL_DIRECT 1           // 1 = LVGL renders straight into 2 panel frame buffers (FULL mode, no copy)
+#endif
+
 
 static esp_lcd_panel_handle_t panel_handle = NULL;
 
@@ -46,7 +62,7 @@ void LCD::initRGBInterface() {
 		},
 		.data_width = 16,
 		.bits_per_pixel = 16,
-		.num_fbs = 1, // --- Frambuffer
+		.num_fbs = LCD_LVGL_DIRECT ? 2 : 1, // --- Frambuffer
 		.bounce_buffer_size_px = 0,
 		.dma_burst_size = 64,
 		.hsync_gpio_num = LCD_PIN_HSYNC,
@@ -500,21 +516,55 @@ void LCD::fillArrow(uint16_t x0,uint16_t y0,uint16_t x1,uint16_t y1,uint16_t w,u
 #ifdef USE_LVGL
 #include "LVGLHelper.h"
 
-static bool IRAM_ATTR notify_lvgl_flush_ready(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *event_data, void *user_ctx) {
-    lv_display_t *disp = (lv_display_t *) user_ctx;
-    lv_display_flush_ready(disp);
-    return false;
+#if LCD_LVGL_DIRECT
+static volatile bool flush_pending = false;
+
+// Runs in ISR: the new frame buffer is on screen, LVGL may now render into the old one
+static bool IRAM_ATTR on_panel_vsync(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *event_data, void *user_ctx) {
+	if (flush_pending) {
+		flush_pending = false;
+		lv_display_flush_ready((lv_display_t *) user_ctx);
+	}
+	return false;
 }
+#endif
 
 static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
 	esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)lv_display_get_user_data(disp);
-	int offsetx1 = area->x1;
-	int offsetx2 = area->x2;
-	int offsety1 = area->y1;
-	int offsety2 = area->y2;
-
-	// pass the draw buffer to the driver
-	esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1,  offsety2 + 1, px_map);
+#if LCD_LVGL_PROFILE
+	static uint32_t flushes = 0, pixels = 0, us = 0, last_print = 0;
+	int64_t t0 = esp_timer_get_time();
+#endif
+#if LCD_LVGL_DIRECT
+	// px_map is one of the panel frame buffers: passing it to draw_bitmap swaps the displayed buffer
+	flush_pending = true;
+	esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, LCD_WIDTH, LCD_HEIGHT, px_map);
+#else
+	// draw_bitmap copies into the frame buffer synchronously, so no need to wait for VSYNC
+	uint32_t w = lv_area_get_width(area);
+	uint32_t h = lv_area_get_height(area);
+	uint32_t stride = lv_draw_buf_width_to_stride(w, LV_COLOR_FORMAT_RGB565);
+	if (stride == w * 2) {
+		esp_lcd_panel_draw_bitmap(panel_handle, area->x1, area->y1, area->x2 + 1, area->y2 + 1, px_map);
+	} else {
+		// rows are padded to LV_DRAW_BUF_STRIDE_ALIGN, but draw_bitmap expects packed rows
+		for (uint32_t row = 0; row < h; row++) {
+			esp_lcd_panel_draw_bitmap(panel_handle, area->x1, area->y1 + row, area->x2 + 1, area->y1 + row + 1, px_map + row * stride);
+		}
+	}
+	lv_display_flush_ready(disp);
+#endif
+#if LCD_LVGL_PROFILE
+	us += (uint32_t)(esp_timer_get_time() - t0);
+	pixels += lv_area_get_width(area) * lv_area_get_height(area);
+	flushes++;
+	if (millis() - last_print >= 1000) {
+		Serial.printf("[LVGL] flushes/s=%lu pixels/s=%lu (%.1f screens) flush_ms/s=%lu\n",
+			(unsigned long)flushes, (unsigned long)pixels, pixels / (float)(LCD_WIDTH * LCD_HEIGHT), (unsigned long)(us / 1000));
+		flushes = pixels = us = 0;
+		last_print = millis();
+	}
+#endif
 }
 
 unsigned long last_touch_on_display = 0;
@@ -542,31 +592,40 @@ void LCD::useLVGL() {
 	lv_display_set_color_format(display, LV_COLOR_FORMAT_RGB565);
 
 	// create draw buffers
-	void *buf1 = NULL;
-	// void *buf2 = NULL;
 	ESP_LOGI(TAG, "Allocate LVGL draw buffers");
-	// it's recommended to allocate the draw buffer from internal memory, for better performance
-	size_t draw_buffer_sz = LCD_WIDTH * 120 * 2; // 30 Lines
-	void *raw_buf1 = heap_caps_malloc(draw_buffer_sz + 64, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
-	buf1 = lv_draw_buf_align(raw_buf1, LV_COLOR_FORMAT_RGB565);
-	assert(buf1);
+#if LCD_LVGL_DIRECT
+	// render straight into the two panel frame buffers (no copy, tear-free swap on VSYNC)
+	void *buf1 = NULL, *buf2 = NULL;
+	ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(panel_handle, 2, &buf1, &buf2));
+	assert(buf1 && buf2);
+	lv_display_set_buffers(display, buf1, buf2, LCD_WIDTH * LCD_HEIGHT * 2, LV_DISPLAY_RENDER_MODE_FULL);
+
+	esp_lcd_rgb_panel_event_callbacks_t cbs = { .on_vsync = on_panel_vsync };
+	ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(panel_handle, &cbs, display));
+#else
+	size_t draw_buffer_sz = LCD_WIDTH * LCD_LVGL_BUF_LINES * 2;
+#if LCD_LVGL_BUF_INTERNAL
+	// double-buffered partial rendering in internal SRAM
+	void *buf1 = heap_caps_aligned_alloc(64, draw_buffer_sz, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+	void *buf2 = heap_caps_aligned_alloc(64, draw_buffer_sz, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+#else
+	void *buf1 = heap_caps_aligned_alloc(64, draw_buffer_sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+	void *buf2 = buf1; // single buffer: satisfies the assert below
+#endif
+	assert(buf1 && buf2);
 	// set LVGL draw buffers and partial mode
-	lv_display_set_buffers(display, buf1, NULL, draw_buffer_sz, LV_DISPLAY_RENDER_MODE_PARTIAL);
+	lv_display_set_buffers(display, buf1, (buf2 == buf1) ? NULL : buf2, draw_buffer_sz, LV_DISPLAY_RENDER_MODE_PARTIAL);
+#endif
 
 	// set the callback which can copy the rendered image to an area of the display
 	lv_display_set_flush_cb(display, lvgl_flush_cb);
 	
-	ESP_LOGI(TAG, "Register event callbacks");
-	esp_lcd_rgb_panel_event_callbacks_t cbs = {
-		.on_color_trans_done = notify_lvgl_flush_ready,
-	};
-	ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(panel_handle, &cbs, display));
 }
 
 void LCD::loop() {
 	{ // UI update
 		static unsigned long timer = 0;
-		if ((millis() < timer) || (timer == 0) || ((millis() - timer) >= 5)) {
+		if ((millis() < timer) || (timer == 0) || ((millis() - timer) >= 2)) {
 			timer = millis();
 			lv_timer_handler();
 		}

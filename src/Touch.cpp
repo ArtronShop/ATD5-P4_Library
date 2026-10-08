@@ -2,7 +2,6 @@
 #include <Wire.h>
 #include "LCD.h"
 #include "Touch.h"
-#include "indev/lv_indev.h"
 
 #include <lvgl.h>
 
