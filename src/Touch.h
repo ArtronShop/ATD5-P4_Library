@@ -16,6 +16,7 @@ class GT911 {
         bool failed = false;
 
     public: 
+        bool data_ready = false; // last read() found a fresh GT911 report (buffer status bit set)
         GT911() ;
 
         void begin() ;

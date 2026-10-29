@@ -104,6 +104,7 @@ uint8_t GT911::read(uint16_t *cx, uint16_t *cy) {
 
 uint8_t GT911::readPoint(uint16_t *cx, uint16_t *cy) {
     this->failed = false;
+    this->data_ready = false;
     uint8_t touch_info;
     if (!this->readReg(0x814E, &touch_info, 1)) {
         ESP_LOGE(TAG, "Read error !");
@@ -121,6 +122,7 @@ uint8_t GT911::readPoint(uint16_t *cx, uint16_t *cy) {
         return 0;
     }
 
+    this->data_ready = true;
     uint8_t touch_point = touch_info & 0x0F;
     if ((touch_point <= 0) || (touch_point > 5)) {
         return 0;
@@ -163,11 +165,24 @@ uint8_t GT911::readPoint(uint16_t *cx, uint16_t *cy) {
 static void touchpad_read(lv_indev_t * indev, lv_indev_data_t * data) {
   GT911 * touch = (GT911 *) lv_indev_get_user_data(indev);
 
+  static bool pressed = false;
+  static lv_point_t last_point = {0, 0};
+  static uint32_t last_report_ms = 0;
+  const uint32_t HOLD_MS = 50; // the GT911 does not have a fresh report on every poll
+
   uint8_t touchPoint = touch->read((uint16_t*)(&data->point.x), (uint16_t*)(&data->point.y));
   if (touchPoint > 0) {
     ESP_LOGV(TAG, "X: %d, Y: %d", data->point.x, data->point.y);
+    pressed = true;
+    last_point = data->point;
+    last_report_ms = millis();
+  } else if (pressed && !touch->data_ready && (millis() - last_report_ms) < HOLD_MS) {
+    // No new report yet (not a release): keep the finger where it was
+    data->point = last_point;
+  } else {
+    pressed = false;
   }
-  data->state = touchPoint > 0 ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+  data->state = pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
 }
 
 lv_indev_t * lvgl_indev = NULL;
