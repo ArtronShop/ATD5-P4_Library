@@ -8,7 +8,9 @@
 // #endif
 
 // Refresh Rate = 18000000/(1+40+20+800)/(1+10+5+480) = 42Hz
+#ifndef LCD_PIXEL_CLOCK_HZ
 #define LCD_PIXEL_CLOCK_HZ     (25 * 1000 * 1000)
+#endif
 #define LCD_WIDTH              800
 #define LCD_HEIGHT             480
 
